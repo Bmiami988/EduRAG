@@ -8,3 +8,4 @@ chromadb
 pypdf
 sentence-transformers
 python-dotenv
+supabase
