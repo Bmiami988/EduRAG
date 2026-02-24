@@ -34,18 +34,29 @@ USER_DB = "users.json"
 
 if not os.path.exists(USER_DB):
     with open(USER_DB, "w") as f:
-        json.dump({}, f)
+        f.write("{}")
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
-
+    
 def load_users():
-    with open(USER_DB, "r") as f:
-        return json.load(f)
+    if not os.path.exists(USER_DB):
+        return {}
+
+    try:
+        with open(USER_DB, "r") as f:
+            content = f.read().strip()
+            if not content:
+                return {}
+            return json.loads(content)
+    except json.JSONDecodeError:
+        return {}
 
 def save_users(users):
-    with open(USER_DB, "w") as f:
+    temp_file = USER_DB + ".tmp"
+    with open(temp_file, "w") as f:
         json.dump(users, f, indent=4)
+    os.replace(temp_file, USER_DB)
 
 def register(username, password):
     users = load_users()
