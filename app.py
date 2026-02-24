@@ -11,7 +11,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.retrievers.multi_query import MultiQueryRetriever
+from langchain_classic.retrievers import MultiQueryRetriever
 
 # -------------------------
 # Load Environment
