@@ -13,6 +13,53 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_classic.retrievers import MultiQueryRetriever
 
 # -----------------------------
+# PAGE CONFIG
+# -----------------------------
+st.set_page_config(
+    page_title="EduRAG AI Tutor",
+    page_icon="🎓",
+    layout="wide"
+)
+
+# -----------------------------
+# Custom Styling
+# -----------------------------
+st.markdown("""
+<style>
+html, body, [class*="css"]  {
+    font-family: 'Inter', sans-serif;
+}
+
+.stApp {
+    background: linear-gradient(135deg, #0f172a, #1e293b);
+    color: white;
+}
+
+.chat-bubble-user {
+    background-color: #2563eb;
+    padding: 12px 18px;
+    border-radius: 18px;
+    margin-bottom: 8px;
+    width: fit-content;
+    max-width: 70%;
+}
+
+.chat-bubble-ai {
+    background-color: #334155;
+    padding: 12px 18px;
+    border-radius: 18px;
+    margin-bottom: 8px;
+    width: fit-content;
+    max-width: 70%;
+}
+
+.sidebar .sidebar-content {
+    background: #0f172a;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# -----------------------------
 # Load Environment
 # -----------------------------
 load_dotenv()
@@ -24,17 +71,18 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -----------------------------
-# Streamlit Config
-# -----------------------------
-st.set_page_config(page_title="EduRAG AI Tutor", layout="wide")
-
-# -----------------------------
-# Authentication
+# Session State
 # -----------------------------
 if "user" not in st.session_state:
     st.session_state.user = None
 
-st.title("EduRAG AI Tutor")
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# -----------------------------
+# Authentication UI
+# -----------------------------
+st.title("🎓 EduRAG AI Tutor")
 
 if not st.session_state.user:
 
@@ -43,74 +91,78 @@ if not st.session_state.user:
     with tab1:
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
+
         if st.button("Login"):
-            res = supabase.auth.sign_in_with_password({
-                "email": email,
-                "password": password
-            })
-            if res.user:
+            email = email.strip().lower()
+            try:
+                res = supabase.auth.sign_in_with_password({
+                    "email": email,
+                    "password": password
+                })
                 st.session_state.user = res.user
                 st.rerun()
-            else:
-                st.error("Invalid credentials")
+            except Exception as e:
+                st.error("Login failed. Check credentials.")
 
     with tab2:
         email = st.text_input("New Email")
         password = st.text_input("New Password", type="password")
+
         if st.button("Register"):
-            res = supabase.auth.sign_up({
-                "email": email,
-                "password": password
-            })
-            if res.user:
-                supabase.table("profiles").insert({
-                    "id": res.user.id,
-                    "email": email
-                }).execute()
-                st.success("Account created")
-            else:
-                st.error("Registration failed")
+            email = email.strip().lower()
+            try:
+                res = supabase.auth.sign_up({
+                    "email": email,
+                    "password": password
+                })
+                st.success("Account created. Check your email if confirmation is enabled.")
+            except Exception:
+                st.error("Registration failed.")
 
     st.stop()
 
 # -----------------------------
-# Logged In
+# Sidebar
 # -----------------------------
 user = st.session_state.user
+
 st.sidebar.success(f"Logged in as {user.email}")
 
 if st.sidebar.button("Logout"):
     st.session_state.user = None
+    st.session_state.messages = []
     st.rerun()
+
+mode = st.sidebar.selectbox(
+    "Learning Mode",
+    ["Explain", "Quiz", "Exam"]
+)
+
+uploaded_file = st.sidebar.file_uploader("Upload Study Material (PDF)", type="pdf")
 
 # -----------------------------
 # Initialize LLM
 # -----------------------------
 llm = ChatGroq(
     model_name="llama-3.3-70b-versatile",
-    temperature=0
+    temperature=0.3
 )
 
-# -----------------------------
-# Vector Store
-# -----------------------------
 embedding_model = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
+
+vectorstore = None
 
 if os.path.exists("edurag_db"):
     vectorstore = Chroma(
         persist_directory="edurag_db",
         embedding_function=embedding_model
     )
-else:
-    vectorstore = None
 
 # -----------------------------
-# Upload PDF
+# PDF Upload
 # -----------------------------
-uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
-
 if uploaded_file:
     with open("temp.pdf", "wb") as f:
         f.write(uploaded_file.read())
@@ -132,7 +184,7 @@ if uploaded_file:
     )
     vectorstore.persist()
 
-    st.sidebar.success("Material indexed")
+    st.sidebar.success("Material indexed successfully!")
 
 # -----------------------------
 # Prompts
@@ -176,17 +228,20 @@ Topic:
 {question}
 """)
 
-mode = st.sidebar.selectbox(
-    "Mode",
-    ["Explain", "Quiz", "Exam"]
-)
-
 # -----------------------------
-# Main Interaction
+# Chat Interface
 # -----------------------------
-question = st.text_area("Ask your question")
+for msg in st.session_state.messages:
+    if msg["role"] == "user":
+        st.markdown(f'<div class="chat-bubble-user">{msg["content"]}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="chat-bubble-ai">{msg["content"]}</div>', unsafe_allow_html=True)
 
-if st.button("Submit") and vectorstore:
+question = st.chat_input("Ask me anything about your material...")
+
+if question and vectorstore:
+
+    st.session_state.messages.append({"role": "user", "content": question})
 
     diff_chain = difficulty_prompt | llm
     difficulty = diff_chain.invoke({"question": question}).content.strip()
@@ -211,12 +266,16 @@ if st.button("Submit") and vectorstore:
         "question": question
     })
 
-    st.subheader(f"Detected Difficulty: {difficulty}")
-    st.write(response.content)
+    answer = f"**Difficulty:** {difficulty}\n\n{response.content}"
 
-    # -----------------------------
-    # Save Progress to Supabase
-    # -----------------------------
+    st.session_state.messages.append({"role": "assistant", "content": answer})
+    st.rerun()
+
+# -----------------------------
+# Save Progress
+# -----------------------------
+if question and vectorstore:
+
     supabase.table("progress").insert({
         "user_id": user.id,
         "topic": question[:100],
@@ -230,5 +289,3 @@ if st.button("Submit") and vectorstore:
         "topic": question[:100],
         "next_review": str(next_review)
     }).execute()
-
-    st.info(f"Next review scheduled: {next_review}")
