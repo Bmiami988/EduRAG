@@ -1,9 +1,8 @@
 import streamlit as st
 import os
-import json
-import hashlib
 import datetime
 from dotenv import load_dotenv
+from supabase import create_client, Client
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -11,116 +10,90 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_classic.retrievers import MultiQueryRetriever
+from langchain.retrievers.multi_query import MultiQueryRetriever
 
-# -------------------------
+# -----------------------------
 # Load Environment
-# -------------------------
+# -----------------------------
 load_dotenv()
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# -------------------------
-# App Config
-# -------------------------
-st.set_page_config(
-    page_title="EduRAG AI Tutor",
-    layout="wide"
-)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# -------------------------
-# User Database Setup
-# -------------------------
-USER_DB = "users.json"
+# -----------------------------
+# Streamlit Config
+# -----------------------------
+st.set_page_config(page_title="EduRAG AI Tutor", layout="wide")
 
-if not os.path.exists(USER_DB):
-    with open(USER_DB, "w") as f:
-        f.write("{}")
+# -----------------------------
+# Authentication
+# -----------------------------
+if "user" not in st.session_state:
+    st.session_state.user = None
 
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-    
-def load_users():
-    if not os.path.exists(USER_DB):
-        return {}
+st.title("EduRAG AI Tutor")
 
-    try:
-        with open(USER_DB, "r") as f:
-            content = f.read().strip()
-            if not content:
-                return {}
-            return json.loads(content)
-    except json.JSONDecodeError:
-        return {}
-
-def save_users(users):
-    temp_file = USER_DB + ".tmp"
-    with open(temp_file, "w") as f:
-        json.dump(users, f, indent=4)
-    os.replace(temp_file, USER_DB)
-
-def register(username, password):
-    users = load_users()
-    if username in users:
-        return False
-    users[username] = {
-        "password": hash_password(password),
-        "progress": {},
-        "reviews": {}
-    }
-    save_users(users)
-    return True
-
-def login(username, password):
-    users = load_users()
-    if username in users and users[username]["password"] == hash_password(password):
-        return True
-    return False
-
-# -------------------------
-# Authentication UI
-# -------------------------
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-if not st.session_state.authenticated:
-    st.title("EduRAG AI Tutor")
+if not st.session_state.user:
 
     tab1, tab2 = st.tabs(["Login", "Register"])
 
     with tab1:
-        username = st.text_input("Username")
+        email = st.text_input("Email")
         password = st.text_input("Password", type="password")
         if st.button("Login"):
-            if login(username, password):
-                st.session_state.authenticated = True
-                st.session_state.username = username
+            res = supabase.auth.sign_in_with_password({
+                "email": email,
+                "password": password
+            })
+            if res.user:
+                st.session_state.user = res.user
                 st.rerun()
             else:
                 st.error("Invalid credentials")
 
     with tab2:
-        new_user = st.text_input("New Username")
-        new_pass = st.text_input("New Password", type="password")
+        email = st.text_input("New Email")
+        password = st.text_input("New Password", type="password")
         if st.button("Register"):
-            if register(new_user, new_pass):
-                st.success("Registered successfully")
+            res = supabase.auth.sign_up({
+                "email": email,
+                "password": password
+            })
+            if res.user:
+                supabase.table("profiles").insert({
+                    "id": res.user.id,
+                    "email": email
+                }).execute()
+                st.success("Account created")
             else:
-                st.error("User already exists")
+                st.error("Registration failed")
 
     st.stop()
 
-# -------------------------
-# Main App
-# -------------------------
-st.sidebar.success(f"Logged in as {st.session_state.username}")
+# -----------------------------
+# Logged In
+# -----------------------------
+user = st.session_state.user
+st.sidebar.success(f"Logged in as {user.email}")
 
+if st.sidebar.button("Logout"):
+    st.session_state.user = None
+    st.rerun()
+
+# -----------------------------
 # Initialize LLM
+# -----------------------------
 llm = ChatGroq(
     model_name="llama-3.3-70b-versatile",
     temperature=0
 )
 
-# Vectorstore setup
+# -----------------------------
+# Vector Store
+# -----------------------------
 embedding_model = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
@@ -133,8 +106,9 @@ if os.path.exists("edurag_db"):
 else:
     vectorstore = None
 
+# -----------------------------
 # Upload PDF
-st.sidebar.header("Upload Study Material")
+# -----------------------------
 uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
 
 if uploaded_file:
@@ -157,19 +131,21 @@ if uploaded_file:
         persist_directory="edurag_db"
     )
     vectorstore.persist()
-    st.sidebar.success("Material indexed successfully")
 
-# -------------------------
-# Modes
-# -------------------------
-mode = st.sidebar.selectbox(
-    "Select Mode",
-    ["Explain", "Quiz", "Exam Simulation"]
-)
+    st.sidebar.success("Material indexed")
 
-# -------------------------
+# -----------------------------
 # Prompts
-# -------------------------
+# -----------------------------
+difficulty_prompt = ChatPromptTemplate.from_template("""
+Classify question difficulty:
+beginner, intermediate, advanced.
+
+Question:
+{question}
+Return one word only.
+""")
+
 simple_prompt = ChatPromptTemplate.from_template("""
 Explain clearly and simply.
 
@@ -191,9 +167,7 @@ Topic:
 """)
 
 exam_prompt = ChatPromptTemplate.from_template("""
-Generate a 10-question exam.
-Include MCQs and short answers.
-Provide answer key at end.
+Generate 10-question exam with answer key.
 
 Context:
 {context}
@@ -202,25 +176,18 @@ Topic:
 {question}
 """)
 
-difficulty_prompt = ChatPromptTemplate.from_template("""
-Classify question difficulty:
-beginner, intermediate, advanced.
+mode = st.sidebar.selectbox(
+    "Mode",
+    ["Explain", "Quiz", "Exam"]
+)
 
-Question:
-{question}
-Return one word only.
-""")
-
-# -------------------------
-# Question Input
-# -------------------------
-st.title("Ask Your AI Tutor")
-
-question = st.text_area("Enter your question")
+# -----------------------------
+# Main Interaction
+# -----------------------------
+question = st.text_area("Ask your question")
 
 if st.button("Submit") and vectorstore:
 
-    # Auto Difficulty Detection
     diff_chain = difficulty_prompt | llm
     difficulty = diff_chain.invoke({"question": question}).content.strip()
 
@@ -247,18 +214,21 @@ if st.button("Submit") and vectorstore:
     st.subheader(f"Detected Difficulty: {difficulty}")
     st.write(response.content)
 
-    # Track progress
-    users = load_users()
-    user = st.session_state.username
-    topic = question[:50]
+    # -----------------------------
+    # Save Progress to Supabase
+    # -----------------------------
+    supabase.table("progress").insert({
+        "user_id": user.id,
+        "topic": question[:100],
+        "score": 100 if mode == "Explain" else 80
+    }).execute()
 
-    users[user]["progress"].setdefault(topic, 0)
-    users[user]["progress"][topic] += 1
-
-    # Spaced repetition scheduling
     next_review = datetime.date.today() + datetime.timedelta(days=3)
-    users[user]["reviews"][topic] = str(next_review)
 
-    save_users(users)
+    supabase.table("reviews").insert({
+        "user_id": user.id,
+        "topic": question[:100],
+        "next_review": str(next_review)
+    }).execute()
 
     st.info(f"Next review scheduled: {next_review}")
